@@ -1,8 +1,8 @@
 # Claude Code Usage in i3bar
 
-Display your Claude Code usage limits (weekly, session, Sonnet) in your i3 status bar, in orange.
+![Plan Usage Limits](usage-pixel.jpg)
 
-![Example output: `CC W:25% S:21% 5h:13% R:112h03m`]
+Display your Claude Code usage limits (weekly, session, Sonnet) in your i3 status bar, in orange.
 
 ## Vibe code it
 
