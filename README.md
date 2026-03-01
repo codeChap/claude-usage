@@ -4,6 +4,14 @@ Display your Claude Code usage limits (weekly, session, Sonnet) in your i3 statu
 
 ![Example output: `CC W:25% S:21% 5h:13% R:112h03m`]
 
+## Vibe code it
+
+Just give Claude Code this prompt:
+
+> Create a python script for ~/bin/claude-usage that fetches my Claude Code usage limits from https://api.anthropic.com/api/oauth/usage using the OAuth token in ~/.claude/.credentials.json (under claudeAiOauth.accessToken). It needs the headers: Authorization Bearer, anthropic-beta: oauth-2025-04-20, and User-Agent: claude-code/2.1.63. The API returns five_hour.utilization, seven_day.utilization, seven_day_sonnet.utilization, and seven_day.resets_at. Display them compactly as one line. Then create a ~/bin/i3status-wrapper in python that wraps i3status, using output_format i3bar JSON protocol so you can inject the usage as a colored block. Update my i3 config bar section to use the wrapper.
+
+Or follow the manual setup below.
+
 ## What it shows
 
 - **W:25%** — Weekly all-models limit usage
