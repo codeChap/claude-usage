@@ -2,24 +2,29 @@
 
 ![Plan Usage Limits](usage-pixel.jpg)
 
-Display your Claude Code usage limits (weekly, session, Sonnet) in your i3 status bar, in orange.
+Display your Claude Code usage limits (weekly, session) in your i3 status bar, in orange.
 
 ## Vibe code it
 
 Just give Claude Code this prompt:
 
-> Create a python script for ~/bin/claude-usage that fetches my Claude Code usage limits from https://api.anthropic.com/api/oauth/usage using the OAuth token in ~/.claude/.credentials.json (under claudeAiOauth.accessToken). It needs the headers: Authorization Bearer, anthropic-beta: oauth-2025-04-20, and User-Agent: claude-code/2.1.63. The API returns five_hour.utilization, seven_day.utilization, seven_day_sonnet.utilization, and seven_day.resets_at. Display them compactly as one line. Then create a ~/bin/i3status-wrapper in python that wraps i3status, using output_format i3bar JSON protocol so you can inject the usage as a colored block. Update my i3 config bar section to use the wrapper.
+> Create a python script for ~/bin/claude-usage that fetches my Claude Code usage limits by making a minimal API call to https://api.anthropic.com/v1/messages using the OAuth token in ~/.claude/.credentials.json (under claudeAiOauth.accessToken) and reading the anthropic-ratelimit-unified response headers (5h-utilization, 7d-utilization, 7d-reset). It needs headers: Authorization Bearer, anthropic-beta: oauth-2025-04-20, anthropic-version: 2023-06-01, and User-Agent: claude-code/2.1.74. Cache results to ~/.claude/.usage-cache.json with 5-minute backoff on failures. Display them compactly as one line. Then create a ~/bin/i3status-wrapper in python that wraps i3status, using output_format i3bar JSON protocol so you can inject the usage as a colored block. Update my i3 config bar section to use the wrapper.
 
 Or follow the manual setup below.
 
 ## What it shows
 
-- **W:25%** — Weekly all-models limit usage
-- **S:21%** — Weekly Sonnet-only limit usage
-- **5h:13%** — Current 5-hour session limit usage
-- **R:112h03m** — Time until weekly reset
+- **W:41%** — Weekly all-models limit usage
+- **5h:61%** — Current 5-hour session limit usage
+- **R:16h04m** — Time until weekly reset
 
-Refreshes every 60 seconds via the Anthropic API.
+Refreshes every 5 minutes via the Anthropic API.
+
+## How it works
+
+The script makes a minimal API call (1 token to Haiku) and reads the `anthropic-ratelimit-unified-*` response headers that Anthropic returns on every messages API call. This is more reliable than the dedicated `/api/oauth/usage` endpoint, which is aggressively rate-limited during active Claude Code sessions.
+
+Results are cached to `~/.claude/.usage-cache.json` so that failures serve stale data instead of showing "CC ?".
 
 ## Prerequisites
 
@@ -32,20 +37,27 @@ Refreshes every 60 seconds via the Anthropic API.
 
 ### 1. Create `~/bin/claude-usage`
 
-This script fetches your usage from the Anthropic API using your Claude Code OAuth token.
+This script fetches your usage by reading ratelimit headers from the Anthropic messages API.
 
 ```python
 #!/usr/bin/env python3
-"""Fetch Claude Code usage limits for i3bar display."""
+"""Fetch Claude Code usage limits for i3bar display.
+
+Gets usage data from ratelimit headers on the messages API,
+which is more reliable than the /api/oauth/usage endpoint.
+"""
 
 import json
+import os
 import subprocess
-import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 CREDS_FILE = Path.home() / ".claude" / ".credentials.json"
-API_URL = "https://api.anthropic.com/api/oauth/usage"
+CACHE_FILE = Path.home() / ".claude" / ".usage-cache.json"
+MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+BACKOFF_SECS = 300  # Don't retry for 5 min after a failure
 
 
 def get_token():
@@ -54,76 +66,111 @@ def get_token():
     return creds["claudeAiOauth"]["accessToken"]
 
 
-def refresh_token():
-    """Run claude auth refresh to get a new token if expired."""
-    subprocess.run(
-        ["claude", "--print", "--max-budget-usd", "0", "hi"],
-        capture_output=True, timeout=15
-    )
-
-
-def fetch_usage(token):
+def fetch_usage_headers(token):
+    """Make a minimal API call and extract ratelimit headers."""
+    payload = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "."}]
+    })
     result = subprocess.run(
         [
-            "curl", "-s",
+            "curl", "-s", "-D", "/dev/stderr",
+            "-X", "POST",
             "-H", f"Authorization: Bearer {token}",
             "-H", "Content-Type: application/json",
-            "-H", "User-Agent: claude-code/2.1.63",
+            "-H", "User-Agent: claude-code/2.1.74",
             "-H", "anthropic-beta: oauth-2025-04-20",
-            API_URL,
+            "-H", "anthropic-version: 2023-06-01",
+            "-d", payload,
+            MESSAGES_URL,
         ],
-        capture_output=True, text=True, timeout=10
+        capture_output=True, text=True, timeout=15
     )
-    return json.loads(result.stdout)
+    # Parse ratelimit headers from stderr (curl -D /dev/stderr)
+    headers = {}
+    for line in result.stderr.split("\n"):
+        if "ratelimit-unified" in line:
+            parts = line.strip().split(": ", 1)
+            if len(parts) == 2:
+                key = parts[0].strip().replace("anthropic-ratelimit-unified-", "")
+                headers[key] = parts[1].strip()
+    return headers
 
 
-def time_until(iso_str):
-    reset = datetime.fromisoformat(iso_str)
-    now = datetime.now(timezone.utc)
-    diff = reset - now
-    total_secs = int(diff.total_seconds())
-    if total_secs <= 0:
+def read_cache():
+    try:
+        return json.loads(CACHE_FILE.read_text())
+    except Exception:
+        return None
+
+
+def write_cache(output, failed=False):
+    data = {"output": output, "ts": datetime.now(timezone.utc).isoformat()}
+    if failed:
+        data["failed_at"] = time.time()
+    CACHE_FILE.write_text(json.dumps(data))
+
+
+def in_backoff(cache):
+    if not cache or "failed_at" not in cache:
+        return False
+    return (time.time() - cache["failed_at"]) < BACKOFF_SECS
+
+
+def time_until_ts(epoch):
+    """Format seconds-since-epoch as time remaining."""
+    diff = int(epoch - time.time())
+    if diff <= 0:
         return "now"
-    hours = total_secs // 3600
-    mins = (total_secs % 3600) // 60
+    hours = diff // 3600
+    mins = (diff % 3600) // 60
     if hours > 0:
         return f"{hours}h{mins:02d}m"
     return f"{mins}m"
 
 
+def format_from_headers(h):
+    """Format ratelimit headers into display string."""
+    weekly_pct = int(float(h.get("7d-utilization", 0)) * 100)
+    session_pct = int(float(h.get("5h-utilization", 0)) * 100)
+
+    parts = [f"W:{weekly_pct}%"]
+    parts.append(f"5h:{session_pct}%")
+
+    reset = h.get("7d-reset")
+    if reset:
+        parts.append(f"R:{time_until_ts(float(reset))}")
+
+    return "CC " + " ".join(parts)
+
+
 def main():
+    cache = read_cache()
+
+    if in_backoff(cache):
+        print(cache.get("output", "CC ?"))
+        return
+
     try:
         token = get_token()
-        data = fetch_usage(token)
+        headers = fetch_usage_headers(token)
 
-        if "error" in data:
-            # Token might be expired, try refresh
-            refresh_token()
-            token = get_token()
-            data = fetch_usage(token)
+        if not headers or "5h-utilization" not in headers:
+            raise RuntimeError("No ratelimit headers in response")
 
-        session = data.get("five_hour", {})
-        weekly = data.get("seven_day", {})
-        sonnet = data.get("seven_day_sonnet", {})
+        output = format_from_headers(headers)
+        write_cache(output)
+        print(output)
 
-        session_pct = int(session.get("utilization", 0))
-        weekly_pct = int(weekly.get("utilization", 0))
-
-        parts = [f"W:{weekly_pct}%"]
-
-        if sonnet:
-            sonnet_pct = int(sonnet.get("utilization", 0))
-            parts.append(f"S:{sonnet_pct}%")
-
-        parts.append(f"5h:{session_pct}%")
-
-        reset = time_until(weekly.get("resets_at", ""))
-        parts.append(f"R:{reset}")
-
-        print("CC " + " ".join(parts))
-
-    except Exception as e:
-        print(f"CC ?")
+    except Exception:
+        old_output = cache.get("output") if cache else None
+        if old_output and old_output != "CC ?":
+            write_cache(old_output, failed=True)
+            print(old_output)
+        else:
+            write_cache("CC ?", failed=True)
+            print("CC ?")
 
 
 if __name__ == "__main__":
@@ -140,7 +187,7 @@ Test it:
 
 ```bash
 ~/bin/claude-usage
-# Output: CC W:25% S:21% 5h:13% R:112h03m
+# Output: CC W:41% 5h:61% R:16h04m
 ```
 
 ### 2. Create `~/bin/i3status-wrapper`
@@ -157,7 +204,7 @@ import subprocess
 import sys
 import time
 
-REFRESH_INTERVAL = 60
+REFRESH_INTERVAL = 300
 
 
 def get_claude_usage():
@@ -260,24 +307,24 @@ bar {
 Press `$mod+Shift+r` or run:
 
 ```bash
-i3-msg reload
+i3-msg restart
 ```
 
 ## API details
 
-The usage data comes from the Anthropic OAuth API at `https://api.anthropic.com/api/oauth/usage`. It uses the OAuth token stored by Claude Code in `~/.claude/.credentials.json` with the `anthropic-beta: oauth-2025-04-20` header.
+Usage data is read from the `anthropic-ratelimit-unified-*` response headers returned on every Anthropic messages API call. The script makes a minimal 1-token Haiku request to retrieve these headers.
 
-The API returns:
-
-| Field | Description |
+| Header | Description |
 |---|---|
-| `five_hour.utilization` | Current session usage % (resets every 5 hours) |
-| `seven_day.utilization` | Weekly all-models usage % |
-| `seven_day_sonnet.utilization` | Weekly Sonnet-only usage % |
-| `seven_day.resets_at` | ISO timestamp of next weekly reset |
+| `anthropic-ratelimit-unified-5h-utilization` | Current session usage ratio (0.0–1.0, resets every 5 hours) |
+| `anthropic-ratelimit-unified-7d-utilization` | Weekly all-models usage ratio (0.0–1.0) |
+| `anthropic-ratelimit-unified-7d-reset` | Unix timestamp of next weekly reset |
+
+The OAuth token stored by Claude Code in `~/.claude/.credentials.json` is used for authentication, with the `anthropic-beta: oauth-2025-04-20` header.
 
 ## Customization
 
 - **Color**: Change `#FF8C00` in the wrapper to any hex color
-- **Refresh rate**: Change `REFRESH_INTERVAL = 60` (seconds) in the wrapper
+- **Refresh rate**: Change `REFRESH_INTERVAL = 300` (seconds) in the wrapper
+- **Backoff**: Change `BACKOFF_SECS = 300` in claude-usage to control retry delay after failures
 - **Position**: Move the `claude_block` insertion in `all_blocks` to append instead of prepend
