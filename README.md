@@ -8,7 +8,7 @@ Display your Claude Code usage limits (weekly, session) in your i3 status bar, i
 
 Just give Claude Code this prompt:
 
-> Create a python script for ~/bin/claude-usage that fetches my Claude Code usage limits by making a minimal API call to https://api.anthropic.com/v1/messages using the OAuth token in ~/.claude/.credentials.json (under claudeAiOauth.accessToken) and reading the anthropic-ratelimit-unified response headers (5h-utilization, 7d-utilization, 7d-reset). It needs headers: Authorization Bearer, anthropic-beta: oauth-2025-04-20, anthropic-version: 2023-06-01, and User-Agent: claude-code/2.1.74. Cache results to ~/.claude/.usage-cache.json with 5-minute backoff on failures. Display them compactly as one line. Then create a ~/bin/i3status-wrapper in python that wraps i3status, using output_format i3bar JSON protocol so you can inject the usage as a colored block. Update my i3 config bar section to use the wrapper.
+> Create a python script for ~/bin/i3-claude-usage that fetches my Claude Code usage limits by making a minimal API call to https://api.anthropic.com/v1/messages using the OAuth token in ~/.claude/.credentials.json (under claudeAiOauth.accessToken) and reading the anthropic-ratelimit-unified response headers (5h-utilization, 7d-utilization, 7d-reset). It needs headers: Authorization Bearer, anthropic-beta: oauth-2025-04-20, anthropic-version: 2023-06-01, and User-Agent: claude-code/2.1.74. Cache results to ~/.claude/.usage-cache.json with 5-minute backoff on failures. Display them compactly as one line. Then create a ~/bin/i3status-wrapper in python that wraps i3status, using output_format i3bar JSON protocol so you can inject the usage as a colored block. Update my i3 config bar section to use the wrapper.
 
 Or follow the manual setup below.
 
@@ -35,7 +35,7 @@ Results are cached to `~/.claude/.usage-cache.json` so that failures serve stale
 
 ## Setup
 
-### 1. Create `~/bin/claude-usage`
+### 1. Create `~/bin/i3-claude-usage`
 
 This script fetches your usage by reading ratelimit headers from the Anthropic messages API.
 
@@ -180,13 +180,13 @@ if __name__ == "__main__":
 Make it executable:
 
 ```bash
-chmod +x ~/bin/claude-usage
+chmod +x ~/bin/i3-claude-usage
 ```
 
 Test it:
 
 ```bash
-~/bin/claude-usage
+~/bin/i3-claude-usage
 # Output: CC W:41% 5h:61% R:16h04m
 ```
 
@@ -210,7 +210,7 @@ REFRESH_INTERVAL = 300
 def get_claude_usage():
     try:
         result = subprocess.run(
-            [os.path.expanduser("~/bin/claude-usage")],
+            [os.path.expanduser("~/bin/i3-claude-usage")],
             capture_output=True, text=True, timeout=15
         )
         return result.stdout.strip() or "CC ?"
@@ -326,5 +326,5 @@ The OAuth token stored by Claude Code in `~/.claude/.credentials.json` is used f
 
 - **Color**: Change `#FF8C00` in the wrapper to any hex color
 - **Refresh rate**: Change `REFRESH_INTERVAL = 300` (seconds) in the wrapper
-- **Backoff**: Change `BACKOFF_SECS = 300` in claude-usage to control retry delay after failures
+- **Backoff**: Change `BACKOFF_SECS = 300` in i3-claude-usage to control retry delay after failures
 - **Position**: Move the `claude_block` insertion in `all_blocks` to append instead of prepend
