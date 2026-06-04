@@ -8,17 +8,18 @@ Display your Claude Code usage limits (weekly, session) in your i3 status bar, i
 
 Just give Claude Code this prompt:
 
-> Create a python script for ~/bin/i3-claude-usage that fetches my Claude Code usage limits by making a minimal API call to https://api.anthropic.com/v1/messages using the OAuth token in ~/.claude/.credentials.json (under claudeAiOauth.accessToken) and reading the anthropic-ratelimit-unified response headers (5h-utilization, 7d-utilization, 7d-reset). It needs headers: Authorization Bearer, anthropic-beta: oauth-2025-04-20, anthropic-version: 2023-06-01, and User-Agent: claude-code/2.1.74. Cache results to ~/.claude/.usage-cache.json with 5-minute backoff on failures. Display them compactly as one line. Then create a ~/bin/i3status-wrapper in python that wraps i3status, using output_format i3bar JSON protocol so you can inject the usage as a colored block. Update my i3 config bar section to use the wrapper.
+> Create a python script for ~/bin/i3-claude-usage that fetches my Claude Code usage limits by making a minimal API call to https://api.anthropic.com/v1/messages using the OAuth token in ~/.claude/.credentials.json (under claudeAiOauth.accessToken) and reading the anthropic-ratelimit-unified response headers (5h-utilization, 5h-reset, 7d-utilization, 7d-reset). It needs headers: Authorization Bearer, anthropic-beta: oauth-2025-04-20, anthropic-version: 2023-06-01, and User-Agent: claude-code/2.1.74. Cache results to ~/.claude/.usage-cache.json with 5-minute backoff on failures. Display them compactly as one line. Then create a ~/bin/i3status-wrapper in python that wraps i3status, using output_format i3bar JSON protocol so you can inject the usage as a colored block. Update my i3 config bar section to use the wrapper.
 
 Or follow the manual setup below.
 
 ## What it shows
 
 - **W:41%** — Weekly all-models limit usage
+- **(16h04m)** — Time until weekly reset
 - **5h:61%** — Current 5-hour session limit usage
-- **R:16h04m** — Time until weekly reset
+- **(2h13m)** — Time until 5-hour session reset
 
-Refreshes every 5 minutes via the Anthropic API.
+Each percentage is followed by its own reset time in parentheses. Refreshes every 5 minutes via the Anthropic API.
 
 ## How it works
 
@@ -136,11 +137,16 @@ def format_from_headers(h):
     session_pct = int(float(h.get("5h-utilization", 0)) * 100)
 
     parts = [f"W:{weekly_pct}%"]
+
+    weekly_reset = h.get("7d-reset")
+    if weekly_reset:
+        parts.append(f"({time_until_ts(float(weekly_reset))})")
+
     parts.append(f"5h:{session_pct}%")
 
-    reset = h.get("7d-reset")
-    if reset:
-        parts.append(f"R:{time_until_ts(float(reset))}")
+    session_reset = h.get("5h-reset")
+    if session_reset:
+        parts.append(f"({time_until_ts(float(session_reset))})")
 
     return "CC " + " ".join(parts)
 
@@ -187,7 +193,7 @@ Test it:
 
 ```bash
 ~/bin/i3-claude-usage
-# Output: CC W:41% 5h:61% R:16h04m
+# Output: CC W:41% (16h04m) 5h:61% (2h13m)
 ```
 
 ### 2. Create `~/bin/i3status-wrapper`
@@ -317,6 +323,7 @@ Usage data is read from the `anthropic-ratelimit-unified-*` response headers ret
 | Header | Description |
 |---|---|
 | `anthropic-ratelimit-unified-5h-utilization` | Current session usage ratio (0.0–1.0, resets every 5 hours) |
+| `anthropic-ratelimit-unified-5h-reset` | Unix timestamp of next 5-hour session reset |
 | `anthropic-ratelimit-unified-7d-utilization` | Weekly all-models usage ratio (0.0–1.0) |
 | `anthropic-ratelimit-unified-7d-reset` | Unix timestamp of next weekly reset |
 
