@@ -34,9 +34,19 @@ Results are cached to `~/.claude/.usage-cache.json` so that failures serve stale
 - Python 3
 - curl
 
+## Layout
+
+| Role | Path |
+|---|---|
+| **Source of truth** | `i3-claude-usage/i3-claude-usage` (this folder) |
+| **Runtime** | `~/bin/i3-claude-usage` → symlink to this file |
+| **Wrapper** | `../i3status-wrapper/` (shared; `~/bin/i3status-wrapper` is a symlink) |
+
+Edit the script **here**. Do not keep a separate copy under `~/bin`.
+
 ## Setup
 
-### 1. Create `~/bin/i3-claude-usage`
+### 1. Create `i3-claude-usage` in this folder (symlink into `~/bin`)
 
 This script fetches your usage by reading ratelimit headers from the Anthropic messages API.
 
@@ -183,10 +193,11 @@ if __name__ == "__main__":
     main()
 ```
 
-Make it executable:
+Make it executable and link into `~/bin`:
 
 ```bash
-chmod +x ~/bin/i3-claude-usage
+chmod +x ./i3-claude-usage
+ln -sfn "$(pwd)/i3-claude-usage" ~/bin/i3-claude-usage
 ```
 
 Test it:
@@ -196,9 +207,11 @@ Test it:
 # Output: CC W:41% (16h04m) 5h:61% (2h13m)
 ```
 
-### 2. Create `~/bin/i3status-wrapper`
+### 2. Shared wrapper (`../i3status-wrapper/`)
 
-This wraps i3status output, prepending the Claude usage as an orange-colored JSON block using the i3bar protocol.
+The live bar uses the **shared** wrapper (all monitors), not a Claude-only copy. Source lives in `i3status-wrapper/`; `~/bin/i3status-wrapper` is a symlink.
+
+For a minimal Claude-only wrapper (standalone rebuild), something like:
 
 ```python
 #!/usr/bin/env python3
@@ -280,11 +293,7 @@ if __name__ == "__main__":
     main()
 ```
 
-Make it executable:
-
-```bash
-chmod +x ~/bin/i3status-wrapper
-```
+Prefer the shared wrapper under `../i3status-wrapper/` (linked as `~/bin/i3status-wrapper`). If you keep a minimal Claude-only wrapper for a standalone setup, put it in that shared folder or symlink it yourself — do not leave a second real copy only under `~/bin`.
 
 ### 3. Configure i3status for JSON output
 

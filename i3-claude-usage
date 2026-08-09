@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Fetch Claude Code usage limits for i3bar display.
+
+Gets usage data from ratelimit headers on the messages API,
+which is more reliable than the /api/oauth/usage endpoint.
+"""
+
+import json
+import os
+import subprocess
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+CREDS_FILE = Path.home() / ".claude" / ".credentials.json"
+CACHE_FILE = Path.home() / ".claude" / ".usage-cache.json"
+MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+BACKOFF_SECS = 300  # Don't retry for 5 min after a failure
+
+
+def get_token():
+    with open(CREDS_FILE) as f:
+        creds = json.load(f)
+    return creds["claudeAiOauth"]["accessToken"]
+
+
+def fetch_usage_headers(token):
+    """Make a minimal API call and extract ratelimit headers."""
+    payload = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "."}]
+    })
+    result = subprocess.run(
+        [
+            "curl", "-s", "-D", "/dev/stderr",
+            "-X", "POST",
+            "-H", f"Authorization: Bearer {token}",
+            "-H", "Content-Type: application/json",
+            "-H", "User-Agent: claude-code/2.1.74",
+            "-H", "anthropic-beta: oauth-2025-04-20",
+            "-H", "anthropic-version: 2023-06-01",
+            "-d", payload,
+            MESSAGES_URL,
+        ],
+        capture_output=True, text=True, timeout=15
+    )
+    # Parse ratelimit headers from stderr (curl -D /dev/stderr)
+    headers = {}
+    for line in result.stderr.split("\n"):
+        if "ratelimit-unified" in line:
+            parts = line.strip().split(": ", 1)
+            if len(parts) == 2:
+                key = parts[0].strip().replace("anthropic-ratelimit-unified-", "")
+                headers[key] = parts[1].strip()
+    return headers
+
+
+def read_cache():
+    try:
+        return json.loads(CACHE_FILE.read_text())
+    except Exception:
+        return None
+
+
+def write_cache(output, failed=False):
+    data = {"output": output, "ts": datetime.now(timezone.utc).isoformat()}
+    if failed:
+        data["failed_at"] = time.time()
+    CACHE_FILE.write_text(json.dumps(data))
+
+
+def in_backoff(cache):
+    if not cache or "failed_at" not in cache:
+        return False
+    return (time.time() - cache["failed_at"]) < BACKOFF_SECS
+
+
+def time_until_ts(epoch):
+    """Format seconds-since-epoch as time remaining."""
+    diff = int(epoch - time.time())
+    if diff <= 0:
+        return "now"
+    hours = diff // 3600
+    mins = (diff % 3600) // 60
+    if hours > 0:
+        return f"{hours}h{mins:02d}m"
+    return f"{mins}m"
+
+
+def format_from_headers(h):
+    """Format ratelimit headers into display string."""
+    weekly_pct = int(float(h.get("7d-utilization", 0)) * 100)
+    session_pct = int(float(h.get("5h-utilization", 0)) * 100)
+
+    parts = [f"W:{weekly_pct}%"]
+
+    weekly_reset = h.get("7d-reset")
+    if weekly_reset:
+        parts.append(f"({time_until_ts(float(weekly_reset))})")
+
+    parts.append(f"5h:{session_pct}%")
+
+    session_reset = h.get("5h-reset")
+    if session_reset:
+        parts.append(f"({time_until_ts(float(session_reset))})")
+
+    return "CC " + " ".join(parts)
+
+
+def main():
+    cache = read_cache()
+
+    if in_backoff(cache):
+        print(cache.get("output", "CC ?"))
+        return
+
+    try:
+        token = get_token()
+        headers = fetch_usage_headers(token)
+
+        if not headers or "5h-utilization" not in headers:
+            raise RuntimeError("No ratelimit headers in response")
+
+        output = format_from_headers(headers)
+        write_cache(output)
+        print(output)
+
+    except Exception:
+        old_output = cache.get("output") if cache else None
+        if old_output and old_output != "CC ?":
+            write_cache(old_output, failed=True)
+            print(old_output)
+        else:
+            write_cache("CC ?", failed=True)
+            print("CC ?")
+
+
+if __name__ == "__main__":
+    main()
